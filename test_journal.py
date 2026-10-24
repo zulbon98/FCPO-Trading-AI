@@ -101,5 +101,89 @@ class JournalTests(unittest.TestCase):
                 load_events([file])
 
 
+class PineAlertInteropTests(unittest.TestCase):
+    """Handwritten synthetic v1.1 messages; these tests do not execute Pine."""
+
+    def synthetic_exit(self, *, side="LONG", symbol="MYX:FCPO-EXAMPLE",
+                       version="FCPO-MORNING-1.1-DRAFT", entry=4000,
+                       exit_price=None, unexpected_fill=False):
+        if exit_price is None:
+            exit_price = 4010 if side == "LONG" else 3990
+        event = exit_event(side=side, entry=entry, exit_price=exit_price, risk=195)
+        event.update({
+            "version": version, "symbol": symbol, "timeframe": "15",
+            "risk_pct": 0.5, "daily_loss_cap_myr": 375,
+            "assumed_fee_per_side_myr": 10, "extra_stop_ticks": 1,
+            "max_trades": 2, "entry_cut_h": 12, "entry_cut_m": 0,
+            "flat_h": 12, "flat_m": 15, "max_hold_m": 90,
+            "test_start_ms": 0, "test_end_ms": 86400000,
+            "event_exclusion": False, "event_start_ms": 45000000,
+            "event_end_ms": 46800000, "continuous_allowed": False,
+            "stop": 3994 if side == "LONG" else 4006,
+            "target": None if unexpected_fill else (4012 if side == "LONG" else 3988),
+            "unexpected_fill": unexpected_fill,
+        })
+        self.assertTrue(set(CONFIG_FIELDS).issubset(event))
+        event["plan_id"] = f"{event['run_id']}:{version}:{symbol}:1000"
+        event["event_id"] = event["plan_id"] + ":exit:2000:1"
+        event["net_r"] = float(f"{event['net_r']:.10f}")
+        return event
+
+    def load_synthetic(self, *messages):
+        with tempfile.TemporaryDirectory() as folder:
+            file = Path(folder) / "synthetic_alerts.jsonl"
+            file.write_text("\n".join(json.dumps(item) for item in messages),
+                            encoding="utf-8")
+            return load_events([file])
+
+    def test_precise_long_and_short_exit_alerts_reconcile(self):
+        for side in ("LONG", "SHORT"):
+            with self.subTest(side=side):
+                events, duplicates = self.load_synthetic(self.synthetic_exit(side=side))
+                rows = closed_trades(events)
+                self.assertEqual(duplicates, 0)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["side"], side)
+                self.assertEqual(rows[0]["net_myr"], 230)
+                self.assertAlmostEqual(rows[0]["net_r"], 230 / 195)
+
+    def test_three_decimal_r_alert_fails_reconciliation(self):
+        for side in ("LONG", "SHORT"):
+            with self.subTest(side=side):
+                event = self.synthetic_exit(side=side)
+                event["net_r"] = round(event["net_r"], 3)
+                events, _ = self.load_synthetic(event)
+                with self.assertRaisesRegex(ValueError, "R multiple"):
+                    closed_trades(events)
+
+    def test_scoped_ids_keep_same_timestamp_contracts_and_versions_separate(self):
+        messages = [
+            self.synthetic_exit(symbol=symbol, version=version)
+            for symbol in ("MYX:FCPO-EXAMPLE-A", "MYX:FCPO-EXAMPLE-B")
+            for version in ("FCPO-MORNING-1.1-DRAFT", "FCPO-MORNING-1.2-FIXTURE")
+        ]
+        events, duplicates = self.load_synthetic(*messages)
+        self.assertEqual((len(events), duplicates), (4, 0))
+        reports = summarize(closed_trades(events))
+        self.assertEqual(len(reports), 4)
+        self.assertTrue(all(report["closed_trades"] == 1 for report in reports))
+        self.assertEqual(
+            {(report["symbol"], report["version"]) for report in reports},
+            {(message["symbol"], message["version"]) for message in messages},
+        )
+
+    def test_unexpected_fill_exit_preserves_importable_reserved_risk(self):
+        # A long stop-limit fills below its frozen stop, then exits immediately.
+        event = self.synthetic_exit(entry=3990, exit_price=3989, unexpected_fill=True)
+        events, duplicates = self.load_synthetic(event)
+        rows = closed_trades(events)
+        self.assertEqual(duplicates, 0)
+        self.assertTrue(events[0]["unexpected_fill"])
+        self.assertLess(events[0]["entry_price"], events[0]["stop"])
+        self.assertEqual(rows[0]["planned_r_myr"], 195)
+        self.assertEqual(rows[0]["net_myr"], -45)
+        self.assertAlmostEqual(rows[0]["net_r"], -45 / 195)
+
+
 if __name__ == "__main__":
     unittest.main()

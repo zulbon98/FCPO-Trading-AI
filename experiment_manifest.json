@@ -1,8 +1,8 @@
 {
   "status": "DRAFT_NOT_ACTIVATED_PINE_NOT_COMPILED",
   "created_local_date": "2026-10-24",
-  "experiment_id": "FCPO-M01",
-  "version": "FCPO-MORNING-1.0-DRAFT",
+  "experiment_id": "FCPO-M02",
+  "version": "FCPO-MORNING-1.1-DRAFT",
   "source_spec": "FCPO_Wyckoff_Study_Guide.pdf, sections 5-10",
   "timezone": "Asia/Kuala_Lumpur",
   "proposed_start": "2026-10-26T00:00:00+08:00",
@@ -50,6 +50,7 @@
   "alert_expiration": null,
   "first_original_alert_received": false,
   "acceptance_checks_passed": false,
-  "source_sha256": "a89fecb2abd174df7b039ab3ef6a6106c9e5d0e09170e3a554a9d6b01c9e9bab",
-  "no_performance_claim": true
+  "source_sha256": "1c98f522f58e6464325a5747e8f38cab9142131dffd118531daca49228b28897",
+  "no_performance_claim": true,
+  "revised_local_date": "2026-10-25"
 }

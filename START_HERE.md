@@ -1,6 +1,6 @@
 # FCPO live forward-test kit
 
-Prepared 24 October 2026. Research draft; not activated in TradingView.
+Updated 25 October 2026. v1.1 research draft; not activated in TradingView.
 
 The goal is to freeze a formula, observe its decisions on incoming FCPO data for
 several months, and retain the records produced at the time. AI can write the
@@ -20,6 +20,35 @@ or live FCPO performance is claimed. Python tests validate the journal utility,
 not Pine compilation, order sequencing or profitability. The simulation switch
 is off until the acceptance checks are completed.
 
+## v1.1 changes
+
+The revised draft is `FCPO-MORNING-1.1-DRAFT`, with a new default run ID,
+`FCPO-M02`. Use a separate sample from v1.0. The range, breakout, retest, H1
+direction, one-contract size, 2D target and default risk/time settings remain
+the baseline below.
+
+- Setup checks require standard candles, a nonblank run ID, valid date/event
+  intervals and entry/flatten times aligned to 15-minute bars. The dashboard
+  explains blocked settings, current state, available risk and rejection counts.
+- Daily counters reset before the first fill or exit on a new local date.
+  Entry cancellation preserves protective exits, and a position carried across
+  a date is closed when the script next executes. Only a newly opened position
+  increments the entry count; a partial liquidation does not count as an entry.
+- An armed order consumes the range's attempt for that morning, including when
+  it expires without a fill. The range is recognized by its start or matching
+  high/low boundaries.
+- An unexpected fill is flagged and immediately closed. Its journal record
+  retains the positive risk accepted when armed, rather than deriving an
+  invalid risk or target from a fill beyond the structural stop.
+- Alert IDs include run, version and contract. Numbers retain up to 10 decimal
+  places for R reconciliation; string escaping includes newlines and tabs.
+  Completed H1 pivot maps persist through intrabar recalculations.
+
+The local suite currently passes 15 tests, including four new tests using
+synthetic v1.1 alert messages. They cover precise long/short R values, rejection
+of insufficient R precision, distinct contract/version IDs, and unexpected-fill
+records. They do not execute or compile Pine.
+
 ## How the unattended run works
 
 A Pine strategy sends hypothetical orders to TradingView's broker emulator.
@@ -38,7 +67,7 @@ install a Windows task, host a webhook, or schedule AI reviews.
 
 | Setting | Baseline |
 |---|---|
-| Test name | FCPO Morning v1.0 |
+| Test name | FCPO Morning v1.1 draft; FCPO-M02 |
 | Proposed period | 26 October 2026 through 24 January 2027 |
 | Timezone | Malaysia, UTC+8 |
 | Instrument | Liquid actual FCPO expiry; same contract for price and volume |
@@ -53,7 +82,7 @@ install a Windows task, host a webhook, or schedule AI reviews.
 | Entry cutoff | 12:00 |
 | Time exit | 12:15, aligned to the 15-minute chart |
 | Maximum hold | 90 minutes, checked on completed bars |
-| Maximum fills | Two per morning; one attempt per range |
+| Maximum fills | Two per morning; one armed attempt per range, including expired orders |
 | Daily loss allowance | RM375; wins do not replenish the gross-loss allowance |
 | Per-trade risk | 0.5% of simulated equity |
 | Trial equity | RM20,000 scenario, not your broker's current balance |
@@ -77,7 +106,8 @@ starting if needed; a later rule change creates a new version and sample.
    for a 2D target before a known opposing H1 pivot. No opposing level means no
    trade.
 6. Pending entries expire after two completed bars, the cutoff, an invalidating
-   completed bar or loss of H1 permission. Never widen the original stop.
+   completed bar or loss of H1 permission. An armed attempt consumes that
+   range for the morning even if it expires. Never widen the original stop.
 
 ### Adaptations and limitations
 
@@ -104,6 +134,9 @@ starting if needed; a later rule change creates a new version and sample.
   The RM10 per-side fee is also a placeholder. Verify actual research inputs.
 - There is no validation of liquidity, queue priority, partial fills, actual
   execution or profitability.
+- Exceptional partial liquidations retain separate exit records. The losing-exit
+  limit and journal statistics count those records separately; inspect them before
+  interpreting results as whole-position statistics.
 
 ## TradingView setup
 
@@ -139,6 +172,9 @@ starting if needed; a later rule change creates a new version and sample.
 
 - Compile the Pine source. Confirm dated FCPO, MYR, tick size 1, point value 25,
   standard candles and 15-minute bars.
+- Confirm the dashboard blocks nonstandard candles, blank run IDs, invalid
+  date/event intervals and nonaligned entry/flatten times. Restore valid inputs
+  before continuing.
 - With orders disabled, enable smoke-test mode and create a test alert. Wait for
   a real completed bar and confirm receipt. Stop/delete the test alert afterward.
   Weekends or market holidays do not create new market bars.
@@ -147,9 +183,24 @@ starting if needed; a later rule change creates a new version and sample.
   time, rather than at their older pivot candle.
 - Inspect gaps, a stop and target inside one bar, and a stop touched while entry
   is pending. Use lower-timeframe data where available; flag uncertainty.
+- After an armed stop-limit expires, confirm a later setup from the same range
+  cannot arm again that morning; check that a different range remains eligible.
+- Inspect an unexpected fill beyond the structural stop or permitted limit.
+  Confirm the emergency close, `unexpected_fill` flag and positive reserved
+  `planned_r_myr`; import the original exit JSON without editing it.
+- Inspect a partial liquidation, if the emulator produces one. Confirm it does
+  not add an entry or duplicate an entry alert, and that exit IDs remain unique.
+- Inspect overnight carry and missing-bar cases. Confirm that the new day's
+  first fill/exit affects the new day's counters, existing protection is retained,
+  and a carried position is closed at the next script execution. No script can
+  submit a close while market updates are absent.
 - Confirm stop, 2D target, quantity, no pyramiding/reversal, 12:00 cancellation,
   12:15 exit and final flat status. Confirm no-trade session messages.
 - Reconcile a trade as signed price change × 25 × contracts minus fees.
+- Import original test alerts from separate contract/version streams sharing a
+  timestamp. Confirm unique IDs, separate summary groups and R reconciliation
+  at the emitted precision. Check that intrabar fill recalculations retain the
+  completed H1 opposing levels used at the decision.
 - Compare original forward messages with the report after reload. Investigate
   any changed/deleted trades without overwriting the original evidence.
 

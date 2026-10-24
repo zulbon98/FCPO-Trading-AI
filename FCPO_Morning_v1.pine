@@ -1,18 +1,18 @@
 //@version=6
 // Research draft: compile and complete the acceptance checks in START_HERE.md.
 // These strategy orders are broker-emulator orders. There is no broker connection.
-strategy("FCPO Morning v1.0 - frozen forward test", overlay=true,
+strategy("FCPO Morning v1.1 - guarded forward test", overlay=true,
      initial_capital=20000, default_qty_type=strategy.fixed, default_qty_value=1,
      pyramiding=0, commission_type=strategy.commission.cash_per_contract,
      commission_value=10, slippage=1, margin_long=10, margin_short=10,
      calc_on_every_tick=false, calc_on_order_fills=true,
      process_orders_on_close=false, use_bar_magnifier=true, max_bars_back=5000)
 
-string VERSION = "FCPO-MORNING-1.0-DRAFT"
+string VERSION = "FCPO-MORNING-1.1-DRAFT"
 string TZ = "Asia/Kuala_Lumpur"
 string gRun = "1. Experiment"
 bool enabled = input.bool(false, "Enable simulated orders after setup checks", group=gRun)
-string runId = input.string("FCPO-M01", "Unique experiment ID; change for every revision", group=gRun)
+string runId = input.string("FCPO-M02", "Unique experiment ID; change for every revision", group=gRun)
 int testStart = input.time(timestamp("26 Oct 2026 00:00 +0800"), "First entry date", group=gRun)
 int testEnd = input.time(timestamp("25 Jan 2027 00:00 +0800"), "Stop date, exclusive", group=gRun)
 bool allowContinuous = input.bool(false, "Allow continuous chart (research only; document roll)", group=gRun)
@@ -27,7 +27,7 @@ int maxTrades = input.int(2, "Maximum filled trades per morning", minval=1, maxv
 
 string gTime = "3. Morning adaptation"
 int entryEndH = input.int(12, "Cancel entries: hour", minval=10, maxval=12, group=gTime)
-int entryEndM = input.int(0, "Cancel entries: minute", minval=0, maxval=59, group=gTime)
+int entryEndM = input.int(0, "Cancel entries: minute (use 15-minute boundary)", minval=0, maxval=59, group=gTime)
 int flatH = input.int(12, "Flatten: hour", minval=10, maxval=12, group=gTime)
 int flatM = input.int(15, "Flatten: minute (use 15-minute boundary)", minval=0, maxval=59, group=gTime)
 int maxHoldM = input.int(90, "Maximum holding minutes; checked on bar close", minval=15, group=gTime)
@@ -42,8 +42,11 @@ bool correctSymbol = syminfo.type == "futures" and str.contains(syminfo.ticker, 
 bool correctSpecs = math.abs(tick - 1.0) < 0.00001 and math.abs(pointValue - 25.0) < 0.00001
 bool correctTF = timeframe.isminutes and timeframe.multiplier == 15
 bool continuous = str.contains(syminfo.ticker, "!")
-bool scheduleOK = entryEndH * 60 + entryEndM > 630 and entryEndH * 60 + entryEndM < flatH * 60 + flatM and flatH * 60 + flatM <= 750 and flatM % 15 == 0
-bool chartOK = correctSymbol and correctSpecs and correctTF and scheduleOK and testEnd > testStart and (allowContinuous or not continuous)
+bool scheduleOK = entryEndH * 60 + entryEndM > 630 and entryEndH * 60 + entryEndM < flatH * 60 + flatM and flatH * 60 + flatM <= 750 and entryEndM % 15 == 0 and flatM % 15 == 0
+bool datesOK = testEnd > testStart
+bool eventOK = not excludeEvent or eventEnd > eventStart
+bool runOK = str.length(str.trim(runId)) > 0
+bool chartOK = correctSymbol and correctSpecs and correctTF and chart.is_standard and scheduleOK and datesOK and eventOK and runOK and (allowContinuous or not continuous)
 
 // Strict two-bar pivots: ties do not qualify. Return only previously CLOSED H1 data.
 f_hourData() =>
@@ -58,9 +61,10 @@ f_hourData() =>
 [hPh, hPl, h0, h1, l0, l1, hStamp] = request.security(syminfo.tickerid, "60", f_hourData(), lookahead=barmerge.lookahead_on)
 bool longPermission = not na(h1) and not na(l1) and h0 > h1 and l0 > l1
 bool shortPermission = not na(h1) and not na(l1) and h0 < h1 and l0 < l1
-var array<float> overheadMap = array.new_float()
-var array<float> belowMap = array.new_float()
-var int mapStamp = na
+// Match the intrabar-persistent decision guard so fill rollback cannot erase a map update.
+varip array<float> overheadMap = array.new_float()
+varip array<float> belowMap = array.new_float()
+varip int mapStamp = na
 
 // Search 8..24 bars BEFORE B; all pivot wings must be inside the window.
 // Later qualifying lengths replace shorter ones, so the longest wins.
@@ -102,14 +106,19 @@ f_opposition(array<float> levels, float entry, int direction) =>
                 found := na(found) ? p : math.max(found, p)
     found
 
-f_num(float x) => na(x) ? "null" : str.tostring(x)
+// Default float formatting rounds to three decimals, too coarse for journal R checks.
+f_num(float x) => na(x) ? "null" : str.tostring(x, "0.##########")
 f_quote(string s) =>
-    '"' + str.replace_all(str.replace_all(s, "\\", "\\\\"), '"', '\\"') + '"'
+    string escaped = str.replace_all(str.replace_all(s, "\\", "\\\\"), '"', '\\"')
+    escaped := str.replace_all(escaped, "\n", "\\n")
+    escaped := str.replace_all(escaped, "\t", "\\t")
+    '"' + escaped + '"'
+f_eventPrefix() => runId + ":" + VERSION + ":" + syminfo.tickerid
 f_header(string eventType, string id) =>
     '{"schema":1,"mode":"SIMULATION","event":' + f_quote(eventType) +
      ',"event_id":' + f_quote(id) + ',"run_id":' + f_quote(runId) +
      ',"version":' + f_quote(VERSION) + ',"symbol":' + f_quote(syminfo.tickerid) +
-     ',"timeframe":"15","emitted_ms":' + str.tostring(timenow) +
+     ',"timeframe":' + f_quote(timeframe.period) + ',"emitted_ms":' + str.tostring(timenow) +
      ',"risk_pct":' + f_num(riskPct) + ',"daily_loss_cap_myr":' + f_num(dailyCap) +
      ',"assumed_fee_per_side_myr":' + f_num(feeSide) + ',"extra_stop_ticks":' + str.tostring(extraStopTicks) +
      ',"max_trades":' + str.tostring(maxTrades) + ',"entry_cut_h":' + str.tostring(entryEndH) +
@@ -156,10 +165,12 @@ varip int dailyLosers = 0
 varip int lastLossBar = na
 varip int lastDecisionBar = na
 varip int sessionReported = na
-varip int lastFilledB = na
-varip int lastFilledRangeStart = na
-varip float lastFilledU = na
-varip float lastFilledL = na
+// Reserve a range on arming, even if the stop-limit expires without a fill.
+varip array<int> attemptedStarts = array.new_int()
+varip array<float> attemptedHighs = array.new_float()
+varip array<float> attemptedLows = array.new_float()
+varip bool unexpectedFill = false
+varip int planExitCount = 0
 varip int rejectedRisk = 0
 varip int rejectedRoom = 0
 varip int rejectedTime = 0
@@ -181,35 +192,59 @@ bool inDates = time >= testStart and time < testEnd
 bool blocked = excludeEvent and time_close >= eventStart and time < eventEnd
 bool eventNext = excludeEvent and time_close < eventStart and time_close + 15 * 60 * 1000 >= eventStart
 bool fillExecution = strategy.position_size != seenPosition or strategy.closedtrades != seenClosed
+bool openedPosition = strategy.position_size != 0 and seenPosition == 0
 seenPosition := strategy.position_size
 seenClosed := strategy.closedtrades
+
+// Reset BEFORE processing the first fill/exit of a new date. Keep protective exits.
+bool newDay = na(dayKey) or localDay != dayKey
+if newDay
+    dayKey := localDay
+    dailyLoss := 0
+    dailyTrades := 0
+    dailyLosers := 0
+    lastLossBar := na
+    rejectedRisk := 0
+    rejectedRoom := 0
+    rejectedTime := 0
+    array.clear(attemptedStarts)
+    array.clear(attemptedHighs)
+    array.clear(attemptedLows)
+    strategy.cancel("L")
+    strategy.cancel("S")
+    stage := 0
 
 // Fill recalculations manage protection/journaling ONLY; they never read current
 // OHLC to discover a setup or generate another entry.
 if strategy.position_size != 0 and not na(plannedStop)
     float fill = strategy.position_avg_price
     float distance = direction * (fill - plannedStop)
-    actualTarget := fill + direction * 2.0 * distance
+    bool badFill = distance <= 0 or direction * (fill - fillLimit) > tick * 0.01
     string entryName = direction == 1 ? "L" : "S"
     string exitName = direction == 1 ? "LX" : "SX"
-    strategy.exit(exitName, from_entry=entryName, stop=plannedStop, limit=actualTarget)
-    if fillExecution
+    if not badFill
+        actualTarget := math.round_to_mintick(fill + direction * 2.0 * distance)
+        strategy.exit(exitName, from_entry=entryName, stop=plannedStop, limit=actualTarget)
+    if openedPosition
         dailyTrades += 1
         stage := 0
-        lastFilledB := bTime
-        lastFilledRangeStart := rangeStart
-        lastFilledU := rangeU
-        lastFilledL := rangeL
-        plannedR := distance * pointValue + 2 * feeSide + extraStopTicks * tick * pointValue
+        unexpectedFill := badFill
+        // Preserve the positive risk accepted at arming for anomalous emergency exits.
+        if not badFill
+            plannedR := distance * pointValue + 2 * feeSide + extraStopTicks * tick * pointValue
+        else
+            actualTarget := na
         int et = strategy.opentrades.entry_time(0)
         string eid = planId + ":entry"
         f_send(f_header("entry", eid) + ',"plan_id":' + f_quote(planId) +
          ',"entry_ms":' + str.tostring(et) + ',"side":' + f_quote(direction == 1 ? "LONG" : "SHORT") +
-         ',"qty":1,"entry_price":' + f_num(fill) + ',"stop":' + f_num(plannedStop) +
-         ',"target":' + f_num(actualTarget) + ',"planned_r_myr":' + f_num(plannedR) + '}')
-        bool badFill = distance <= 0 or direction * (fill - fillLimit) > tick * 0.01
-        if badFill
-            strategy.close_all(comment="Unexpected fill", immediately=true)
+         ',"qty":' + f_num(math.abs(strategy.position_size)) + ',"entry_price":' + f_num(fill) + ',"stop":' + f_num(plannedStop) +
+         ',"target":' + f_num(actualTarget) + ',"planned_r_myr":' + f_num(plannedR) +
+         ',"unexpected_fill":' + (unexpectedFill ? "true" : "false") + '}')
+    if badFill
+        strategy.close_all(comment="Unexpected fill", immediately=true)
+    else if newDay
+        strategy.close_all(comment="Position carried across date", immediately=true)
 
 // Self-contained closed-trade records survive a later historical recalculation
 // when retained as original alert emails or exported to the journal.
@@ -227,7 +262,9 @@ if strategy.closedtrades > journalClosed
             lastLossBar := bar_index
         int et = strategy.closedtrades.entry_time(j)
         int xt = strategy.closedtrades.exit_time(j)
-        string xid = planId + ":exit"
+        // A per-plan sequence stays stable when unrelated earlier history changes.
+        planExitCount += 1
+        string xid = planId + ":exit:" + str.tostring(xt) + ":" + str.tostring(planExitCount)
         f_send(f_header("exit", xid) + ',"plan_id":' + f_quote(planId) +
          ',"entry_ms":' + str.tostring(et) + ',"exit_ms":' + str.tostring(xt) +
          ',"side":' + f_quote(qty > 0 ? "LONG" : "SHORT") + ',"qty":' + f_num(math.abs(qty)) +
@@ -235,13 +272,14 @@ if strategy.closedtrades > journalClosed
          ',"stop":' + f_num(plannedStop) + ',"target":' + f_num(actualTarget) +
          ',"gross_myr":' + f_num(gross) + ',"fees_myr":' + f_num(fees) +
          ',"net_myr":' + f_num(net) + ',"planned_r_myr":' + f_num(plannedR) +
+         ',"unexpected_fill":' + (unexpectedFill ? "true" : "false") +
          ',"net_r":' + f_num(plannedR > 0 ? net / plannedR : na) + '}')
     journalClosed := strategy.closedtrades
 
 bool decide = barstate.isconfirmed and not fillExecution and (na(lastDecisionBar) or lastDecisionBar != bar_index)
 if decide
     lastDecisionBar := bar_index
-    if na(mapStamp) or hStamp != mapStamp
+    if not na(hStamp) and (na(mapStamp) or hStamp != mapStamp)
         mapStamp := hStamp
         if not na(hPh)
             array.push(overheadMap, hPh)
@@ -251,30 +289,15 @@ if decide
             array.push(belowMap, hPl)
             if array.size(belowMap) > 50
                 array.shift(belowMap)
-    if na(dayKey) or localDay != dayKey
-        dayKey := localDay
-        dailyLoss := 0
-        dailyTrades := 0
-        dailyLosers := 0
-        lastLossBar := na
-        lastFilledB := na
-        lastFilledRangeStart := na
-        lastFilledU := na
-        lastFilledL := na
-        rejectedRisk := 0
-        rejectedRoom := 0
-        rejectedTime := 0
-        strategy.cancel_all()
-        stage := 0
-
     bool ready = enabled and chartOK and inDates and weekday and morning
     bool atCutoff = time_close >= entryCut
-    bool mustFlat = time_close >= flatCut or time_close >= testEnd or blocked or eventNext or not enabled
+    bool mustFlat = time_close >= flatCut or time_close >= testEnd or blocked or eventNext or not enabled or not chartOK or not morning
     if strategy.position_size != 0
         int et = strategy.opentrades.entry_time(0)
         bool heldTooLong = time_close - et >= maxHoldM * 60 * 1000
         if mustFlat or heldTooLong
-            strategy.cancel_all()
+            strategy.cancel("L")
+            strategy.cancel("S")
             strategy.close_all(comment="Time/event exit", immediately=true)
     if mustFlat or atCutoff or not ready
         strategy.cancel("L")
@@ -320,12 +343,22 @@ if decide
                 bool room = not na(obstacle) and (direction == 1 ? worstTarget <= obstacle - frozenZ : worstTarget >= obstacle + frozenZ)
                 bool affordable = worstDistance > 0 and worstRisk <= remaining
                 bool timeOK = time_close < entryCut and time_close + 15 * 60 * 1000 <= flatCut
-                bool repeatedRange = not na(lastFilledRangeStart) and (rangeStart == lastFilledRangeStart or (math.abs(rangeU - lastFilledU) <= tick * 0.01 and math.abs(rangeL - lastFilledL) <= tick * 0.01))
+                bool repeatedRange = false
+                if array.size(attemptedStarts) > 0
+                    for j = 0 to array.size(attemptedStarts) - 1
+                        bool sameBounds = math.abs(rangeU - array.get(attemptedHighs, j)) <= tick * 0.01 and math.abs(rangeL - array.get(attemptedLows, j)) <= tick * 0.01
+                        repeatedRange := repeatedRange or rangeStart == array.get(attemptedStarts, j) or sameBounds
                 if room and affordable and timeOK and not repeatedRange
                     qIndex := bar_index
-                    planId := runId + ":" + syminfo.tickerid + ":" + str.tostring(bTime)
+                    planId := f_eventPrefix() + ":" + str.tostring(bTime)
+                    array.push(attemptedStarts, rangeStart)
+                    array.push(attemptedHighs, rangeU)
+                    array.push(attemptedLows, rangeL)
                     stage := 2
                     plannedR := worstRisk
+                    actualTarget := na
+                    unexpectedFill := false
+                    planExitCount := 0
                     // Fixed protective stop exists before the first fill recalculation.
                     if direction == 1
                         strategy.entry("L", strategy.long, qty=1, stop=trigger, limit=fillLimit)
@@ -341,7 +374,7 @@ if decide
                     rejectedRisk += affordable ? 0 : 1
                     rejectedRoom += room ? 0 : 1
                     rejectedTime += timeOK ? 0 : 1
-                    f_send(f_header("rejected", runId + ":" + str.tostring(time) + ":reject") +
+                    f_send(f_header("rejected", f_eventPrefix() + ":" + str.tostring(time) + ":reject") +
                      ',"risk_ok":' + (affordable ? "true" : "false") +
                      ',"room_ok":' + (room ? "true" : "false") +
                      ',"time_ok":' + (timeOK ? "true" : "false") +
@@ -360,7 +393,7 @@ if decide
         bool enoughEffort = barSpread > 0 and barSpread >= medianSpread and volume >= medianVolume
         bool longB = n > 0 and longPermission and close >= u + zNow and close > open and close >= low + 2.0 * barSpread / 3.0
         bool shortB = n > 0 and shortPermission and close <= l - zNow and close < open and close <= low + barSpread / 3.0
-        if enoughEffort and (longB or shortB) and (na(lastFilledB) or time != lastFilledB)
+        if enoughEffort and (longB or shortB)
             direction := longB ? 1 : -1
             boundary := longB ? u : l
             rangeU := u
@@ -383,7 +416,7 @@ if decide
 // Wait until any time-exit fill has been processed before issuing the day record.
 if enabled and chartOK and inDates and morning and barstate.isconfirmed and time_close >= flatCut and strategy.position_size == 0 and (na(sessionReported) or sessionReported != localDay)
     sessionReported := localDay
-    string sid = runId + ":" + str.tostring(localDay) + ":session"
+    string sid = f_eventPrefix() + ":" + str.tostring(localDay) + ":session"
     f_send(f_header("session_end", sid) + ',"date_key":' + str.tostring(localDay) +
      ',"filled_trades":' + str.tostring(dailyTrades) + ',"losing_trades":' + str.tostring(dailyLosers) +
      ',"gross_loss_allowance_used_myr":' + f_num(dailyLoss) +
@@ -391,21 +424,59 @@ if enabled and chartOK and inDates and morning and barstate.isconfirmed and time
      ',"rejected_time":' + str.tostring(rejectedTime) + '}')
 
 if smokeTest and barstate.isrealtime and barstate.isconfirmed and not fillExecution
-    alert(f_header("heartbeat", runId + ":" + str.tostring(time) + ":heartbeat") + '}', alert.freq_once_per_bar_close)
+    alert(f_header("heartbeat", f_eventPrefix() + ":" + str.tostring(time) + ":heartbeat") + '}', alert.freq_once_per_bar_close)
 
 plot(stage > 0 ? rangeU : na, "Frozen range high", color=color.new(color.teal, 10), style=plot.style_linebr)
 plot(stage > 0 ? rangeL : na, "Frozen range low", color=color.new(color.orange, 10), style=plot.style_linebr)
 plot(strategy.position_size != 0 ? plannedStop : na, "Original stop", color=color.red, style=plot.style_linebr)
 plot(strategy.position_size != 0 ? actualTarget : na, "2D target", color=color.lime, style=plot.style_linebr)
-var table status = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 15))
+plot(stage == 2 ? trigger : na, "Pending entry trigger", color=color.blue, style=plot.style_linebr)
+plot(stage == 2 ? plannedStop : na, "Pending protective stop", color=color.new(color.red, 40), style=plot.style_linebr)
+string setupStatus = switch
+    not chart.is_standard => "Use standard candles"
+    not correctSymbol => "Use an FCPO futures contract in MYR"
+    not correctSpecs => "Expected tick 1 / point value 25"
+    not correctTF => "Use a 15-minute chart"
+    continuous and not allowContinuous => "Select a dated contract"
+    not scheduleOK => "Align cutoffs to 15m; entry < flat <= 12:30"
+    not datesOK => "Stop date must follow start date"
+    not eventOK => "Event end must follow event start"
+    not runOK => "Enter a nonblank experiment ID"
+    => "OK; verify real-time data"
+string workflowStatus = switch
+    not chartOK => "SETUP BLOCKED"
+    not enabled => "SIMULATION DISABLED"
+    strategy.position_size != 0 => "MANAGING POSITION"
+    not inDates => "OUTSIDE TEST DATES"
+    not morning or not weekday => "OUTSIDE MORNING SESSION"
+    time_close >= entryCut => "ENTRY CUTOFF REACHED"
+    blocked or eventNext => "EVENT EXCLUSION"
+    dailyLoss >= dailyCap => "DAILY LOSS LIMIT"
+    dailyTrades >= maxTrades => "DAILY FILL LIMIT"
+    dailyLosers >= 2 => "TWO LOSING EXITS"
+    not na(lastLossBar) and bar_index <= lastLossBar + 1 => "PAUSE AFTER LOSS"
+    stage == 2 => "ENTRY ORDER WORKING"
+    stage == 1 => "WAITING FOR RETEST"
+    bar_index <= 100 or na(atrPrev) or na(medianVolume) => "LOADING HISTORY"
+    na(volume) or volume <= 0 => "WAITING FOR VOLUME"
+    not longPermission and not shortPermission => "WAITING FOR H1 DIRECTION"
+    => "SCANNING FOR BREAKOUT"
+float availableRisk = math.max(0, math.min(strategy.equity * riskPct / 100.0, dailyCap - dailyLoss))
+var table status = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 15))
 if barstate.islast
-    table.cell(status, 0, 0, "FCPO v1.0 DRAFT", text_color=color.white)
-    table.cell(status, 1, 0, enabled ? "SIMULATION" : "DISABLED", text_color=enabled ? color.lime : color.orange)
-    table.cell(status, 0, 1, "Chart / contract", text_color=color.white)
-    table.cell(status, 1, 1, chartOK ? "OK; verify real-time" : "Check FCPO / MYR / 15m / expiry", text_color=chartOK ? color.lime : color.orange)
-    table.cell(status, 0, 2, "Morning fills", text_color=color.white)
-    table.cell(status, 1, 2, str.tostring(dailyTrades), text_color=color.white)
-    table.cell(status, 0, 3, "Daily loss used", text_color=color.white)
-    table.cell(status, 1, 3, f_num(dailyLoss), text_color=color.white)
-    table.cell(status, 0, 4, "H1 permission", text_color=color.white)
-    table.cell(status, 1, 4, longPermission ? "LONG" : shortPermission ? "SHORT" : "NONE", text_color=color.white)
+    table.cell(status, 0, 0, "FCPO v1.1 DRAFT", text_color=color.white)
+    table.cell(status, 1, 0, enabled and chartOK ? "SIMULATION" : "DISABLED", text_color=enabled and chartOK ? color.lime : color.orange)
+    table.cell(status, 0, 1, "Setup checks", text_color=color.white)
+    table.cell(status, 1, 1, setupStatus, text_color=chartOK ? color.lime : color.orange)
+    table.cell(status, 0, 2, "Current state", text_color=color.white)
+    table.cell(status, 1, 2, workflowStatus, text_color=color.white)
+    table.cell(status, 0, 3, "Morning fills", text_color=color.white)
+    table.cell(status, 1, 3, str.tostring(dailyTrades) + " / " + str.tostring(maxTrades), text_color=color.white)
+    table.cell(status, 0, 4, "Loss used / allowance (MYR)", text_color=color.white)
+    table.cell(status, 1, 4, f_num(dailyLoss) + " / " + f_num(dailyCap), text_color=color.white)
+    table.cell(status, 0, 5, "Available risk (MYR)", text_color=color.white)
+    table.cell(status, 1, 5, f_num(availableRisk), text_color=color.white)
+    table.cell(status, 0, 6, "H1 permission", text_color=color.white)
+    table.cell(status, 1, 6, longPermission ? "LONG" : shortPermission ? "SHORT" : "NONE", text_color=color.white)
+    table.cell(status, 0, 7, "Rejections: risk / room / time", text_color=color.white)
+    table.cell(status, 1, 7, str.tostring(rejectedRisk) + " / " + str.tostring(rejectedRoom) + " / " + str.tostring(rejectedTime), text_color=color.white)
